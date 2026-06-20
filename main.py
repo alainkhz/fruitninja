@@ -247,12 +247,12 @@ def show_camera_error() -> None:
 def build_spawn_profile(state: GameState, base_request: dict[str, float]) -> dict[str, float]:
     profile = dict(base_request)
     level_index = max(0, state.level - 1)
-    profile["velocity_multiplier"] = profile.get("velocity_multiplier", 1.0) * min(1.0 + level_index * 0.05, 1.35)
-    profile["bomb_chance_multiplier"] = profile.get("bomb_chance_multiplier", 1.0) * min(1.0 + level_index * 0.04, 1.28)
-    profile["gold_weight"] = profile.get("gold_weight", 1.0) * min(1.0 + level_index * 0.03, 1.18)
-    profile["freeze_weight"] = profile.get("freeze_weight", 1.0) * min(1.0 + level_index * 0.025, 1.16)
-    profile["fire_weight"] = profile.get("fire_weight", 1.0) * min(1.0 + level_index * 0.04, 1.24)
-    profile["shock_weight"] = profile.get("shock_weight", 1.0) * min(1.0 + level_index * 0.04, 1.24)
+    profile["velocity_multiplier"] = profile.get("velocity_multiplier", 1.0) * min(1.0 + level_index * 0.08, 1.65)
+    profile["bomb_chance_multiplier"] = profile.get("bomb_chance_multiplier", 1.0) * min(1.0 + level_index * 0.06, 1.45)
+    profile["gold_weight"] = profile.get("gold_weight", 1.0) * min(1.0 + level_index * 0.04, 1.24)
+    profile["freeze_weight"] = profile.get("freeze_weight", 1.0) * min(1.0 + level_index * 0.035, 1.22)
+    profile["fire_weight"] = profile.get("fire_weight", 1.0) * min(1.0 + level_index * 0.06, 1.38)
+    profile["shock_weight"] = profile.get("shock_weight", 1.0) * min(1.0 + level_index * 0.06, 1.38)
 
     mode = state.settings.selected_mode
     if mode == MODE_ZEN:
@@ -305,22 +305,22 @@ def detect_cyclone(trail: deque[tuple[int, int]]) -> bool:
 
 def get_spawn_interval_seconds(state: GameState) -> float:
     mode = state.settings.selected_mode
-    level_multiplier = max(0.62, 1.0 - (state.level - 1) * 0.035)
+    level_multiplier = max(0.42, 1.0 - (state.level - 1) * 0.06)
     interval = SPAWN_INTERVAL_SECONDS * level_multiplier
     if mode == MODE_ZEN:
-        interval *= 0.92
+        interval *= 0.88
     if mode == MODE_CHALLENGE:
-        interval *= 0.78
-    return max(0.48, interval)
+        interval *= 0.72
+    return max(0.34, interval)
 
 
 def get_max_active_fruits(state: GameState) -> int:
     mode = state.settings.selected_mode
-    level_bonus = 1 if state.level >= 4 else 0
+    level_bonus = min(4, state.level // 2)
     if mode == MODE_CHALLENGE:
         return 4 + level_bonus
     if mode == MODE_ZEN:
-        return 3
+        return 3 + min(2, state.level // 3)
     return 3 + level_bonus
 
 
