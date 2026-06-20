@@ -56,13 +56,8 @@ class Spawner:
                 color=(30, 30, 30),
             )
 
-        fruit_styles = [
-            ("orange", (0, 170, 255)),
-            ("lime", (80, 210, 80)),
-            ("apple", (40, 40, 220)),
-            ("peach", (100, 170, 255)),
-        ]
-        fruit_name, fruit_color = self.random.choice(fruit_styles)
+        fruit_name = "classic"
+        fruit_color = (70, 105, 255)
         effect_roll = self.random.random()
         effect = "normal"
         score_value = FRUIT_SCORE
@@ -89,7 +84,7 @@ class Spawner:
         elif effect_roll < gold_chance + freeze_chance + fire_chance + shock_chance:
             effect = "shock"
             fruit_name = "shock"
-            fruit_color = (80, 230, 255)
+            fruit_color = (30, 245, 255)
             score_value = SHOCK_FRUIT_SCORE
 
         return GameObject(

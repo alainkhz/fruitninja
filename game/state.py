@@ -5,7 +5,6 @@ from dataclasses import dataclass, field
 
 from config import MAX_MISSES
 from game.history import GameHistoryEntry
-from game.missions import Mission
 from game.settings import RuntimeSettings
 from game.effects import HitEffect, Particle, ScorePopup
 from game.menu import MenuButton
@@ -42,9 +41,12 @@ class GameState:
     shock_sliced: int = 0
     bombs_hit: int = 0
     max_combo: int = 0
+    level: int = 1
+    next_level_score: int = 200
+    highest_level_reached: int = 1
+    level_transition_until: float = 0.0
+    level_banner_text: str = ""
     history_entries: list[GameHistoryEntry] = field(default_factory=list)
-    active_missions: list[Mission] = field(default_factory=list)
-    completed_missions: list[Mission] = field(default_factory=list)
     settings: RuntimeSettings = field(default_factory=RuntimeSettings)
 
     @property

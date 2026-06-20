@@ -22,6 +22,7 @@ class GameHistoryEntry:
     bombs_hit: int = 0
     misses: int = 0
     max_combo: int = 0
+    highest_level: int = 1
     end_reason: str = ""
 
 
@@ -68,6 +69,7 @@ def summarize_history(entries: list[GameHistoryEntry]) -> dict[str, float | int]
             "best_score": 0,
             "average_score": 0,
             "best_combo": 0,
+            "best_level": 0,
             "total_fruits": 0,
         }
 
@@ -77,6 +79,7 @@ def summarize_history(entries: list[GameHistoryEntry]) -> dict[str, float | int]
         "best_score": max(entry.score for entry in entries),
         "average_score": round(total_score / len(entries), 1),
         "best_combo": max(entry.max_combo for entry in entries),
+        "best_level": max(entry.highest_level for entry in entries),
         "total_fruits": sum(entry.fruits_sliced for entry in entries),
     }
 

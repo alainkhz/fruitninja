@@ -32,6 +32,7 @@ class HandTracker:
         max_num_hands: int = 1,
         min_detection_confidence: float = 0.6,
         min_tracking_confidence: float = 0.6,
+        process_width: int = 640,
     ) -> None:
         model_path = Path(HAND_LANDMARKER_MODEL_PATH)
         if not model_path.exists():
@@ -42,7 +43,7 @@ class HandTracker:
 
         options = HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_path=str(model_path.resolve())),
-            running_mode=RunningMode.IMAGE,
+            running_mode=RunningMode.VIDEO,
             num_hands=max_num_hands,
             min_hand_detection_confidence=min_detection_confidence,
             min_hand_presence_confidence=min_tracking_confidence,
@@ -50,11 +51,19 @@ class HandTracker:
         )
         self.landmarker = HandLandmarker.create_from_options(options)
         self.index_tip_landmark = 8
+        self.process_width = process_width
 
     def process(self, frame) -> HandTrackingResult:
-        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        frame_height, frame_width = frame.shape[:2]
+        scale = 1.0
+        process_frame = frame
+        if frame_width > self.process_width:
+            scale = self.process_width / frame_width
+            process_frame = cv2.resize(frame, (int(frame_width * scale), int(frame_height * scale)), interpolation=cv2.INTER_LINEAR)
+
+        rgb_frame = cv2.cvtColor(process_frame, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=np.asarray(rgb_frame))
-        results = self.landmarker.detect(mp_image)
+        results = self.landmarker.detect_for_video(mp_image, int(cv2.getTickCount() / cv2.getTickFrequency() * 1000))
 
         if not results.hand_landmarks:
             return HandTrackingResult(
@@ -65,9 +74,9 @@ class HandTracker:
 
         hand_landmarks = results.hand_landmarks[0]
         landmark = hand_landmarks[self.index_tip_landmark]
-        frame_height, frame_width = frame.shape[:2]
-        x = int(landmark.x * frame_width)
-        y = int(landmark.y * frame_height)
+        processed_height, processed_width = process_frame.shape[:2]
+        x = int((landmark.x * processed_width) / scale)
+        y = int((landmark.y * processed_height) / scale)
 
         return HandTrackingResult(
             index_finger_tip=(x, y),

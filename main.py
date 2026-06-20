@@ -39,7 +39,6 @@ from game.menu import (
     build_mode_menu,
     build_settings_menu,
 )
-from game.missions import build_default_missions, evaluate_missions
 from game.settings import load_settings, save_settings
 from game.sound import (
     play_bomb_sound,
@@ -68,6 +67,33 @@ from render.renderer import (
 from tracking.hand_tracker import HandTracker
 from utils.math_helpers import euclidean_distance, point_to_segment_distance
 
+MODE_ARCADE = "\u6a19\u6e96\u6a21\u5f0f"
+MODE_ZEN = "\u79aa\u6a21\u5f0f"
+MODE_CHALLENGE = "\u6311\u6230\u6a21\u5f0f"
+END_REASON_BOMB = "\u70b8\u5f48"
+END_REASON_MISS = "\u5931\u8aa4"
+
+
+def get_level_target(level: int) -> int:
+    if level <= 1:
+        return 600
+    return 600 + (level - 1) * 450
+
+
+def get_level_progress(state: GameState) -> float:
+    previous_target = 0 if state.level <= 1 else get_level_target(state.level - 1)
+    segment = max(1, state.next_level_score - previous_target)
+    return max(0.0, min(1.0, (state.score - previous_target) / segment))
+
+
+def apply_level_up(state: GameState, current_time: float) -> None:
+    while state.score >= state.next_level_score:
+        state.level += 1
+        state.highest_level_reached = max(state.highest_level_reached, state.level)
+        state.next_level_score = get_level_target(state.level)
+        state.level_transition_until = current_time + 1.2
+        state.level_banner_text = f"\u9032\u5165\u7b2c {state.level} \u95dc"
+
 
 def reset_game(state: GameState) -> None:
     state.mode = "playing"
@@ -93,12 +119,15 @@ def reset_game(state: GameState) -> None:
     state.shock_sliced = 0
     state.bombs_hit = 0
     state.max_combo = 0
+    state.level = 1
+    state.next_level_score = get_level_target(1)
+    state.highest_level_reached = 1
+    state.level_transition_until = 0.0
+    state.level_banner_text = ""
     state.skill_charge = 0.0
     state.blade_rush_until = 0.0
     state.blade_rush_cooldown_until = 0.0
     state.cyclone_cooldown_until = 0.0
-    state.completed_missions = []
-    state.active_missions = build_default_missions()
 
 
 def reset_to_main_menu(state: GameState, frame_width: int, frame_height: int) -> None:
@@ -115,10 +144,14 @@ def reset_to_main_menu(state: GameState, frame_width: int, frame_height: int) ->
     state.freeze_until = 0.0
     state.fire_until = 0.0
     state.combo_flash_until = 0.0
+    state.level = 1
+    state.next_level_score = get_level_target(1)
+    state.highest_level_reached = 1
+    state.level_transition_until = 0.0
+    state.level_banner_text = ""
     state.menu_buttons = build_main_menu(frame_width, frame_height)
     state.hovered_button_action = None
     state.hover_started_at = 0.0
-    state.completed_missions = []
 
 
 def show_history_menu(state: GameState, frame_width: int, frame_height: int) -> None:
@@ -152,7 +185,6 @@ def show_settings_menu(state: GameState, frame_width: int, frame_height: int) ->
 def record_game_history(state: GameState, end_reason: str) -> None:
     if state.session_started_at <= 0:
         return
-    state.completed_missions = [mission for mission in evaluate_missions(state, end_reason) if mission.completed]
     entry = GameHistoryEntry(
         played_at=now_iso(),
         score=state.score,
@@ -165,6 +197,7 @@ def record_game_history(state: GameState, end_reason: str) -> None:
         bombs_hit=state.bombs_hit,
         misses=state.misses,
         max_combo=state.max_combo,
+        highest_level=state.highest_level_reached,
         end_reason=end_reason,
     )
     state.history_entries = append_history(entry)
@@ -213,12 +246,20 @@ def show_camera_error() -> None:
 
 def build_spawn_profile(state: GameState, base_request: dict[str, float]) -> dict[str, float]:
     profile = dict(base_request)
+    level_index = max(0, state.level - 1)
+    profile["velocity_multiplier"] = profile.get("velocity_multiplier", 1.0) * min(1.0 + level_index * 0.05, 1.35)
+    profile["bomb_chance_multiplier"] = profile.get("bomb_chance_multiplier", 1.0) * min(1.0 + level_index * 0.04, 1.28)
+    profile["gold_weight"] = profile.get("gold_weight", 1.0) * min(1.0 + level_index * 0.03, 1.18)
+    profile["freeze_weight"] = profile.get("freeze_weight", 1.0) * min(1.0 + level_index * 0.025, 1.16)
+    profile["fire_weight"] = profile.get("fire_weight", 1.0) * min(1.0 + level_index * 0.04, 1.24)
+    profile["shock_weight"] = profile.get("shock_weight", 1.0) * min(1.0 + level_index * 0.04, 1.24)
+
     mode = state.settings.selected_mode
-    if mode == "禪模式":
+    if mode == MODE_ZEN:
         profile["bomb_chance_multiplier"] = 0.0
         profile["gold_weight"] = profile.get("gold_weight", 1.0) * 1.2
         profile["freeze_weight"] = profile.get("freeze_weight", 1.0) * 1.2
-    elif mode == "挑戰模式":
+    elif mode == MODE_CHALLENGE:
         profile["bomb_chance_multiplier"] = profile.get("bomb_chance_multiplier", 1.0) * 1.3
         profile["velocity_multiplier"] = profile.get("velocity_multiplier", 1.0) * 1.16
         profile["shock_weight"] = profile.get("shock_weight", 1.0) * 1.2
@@ -226,13 +267,13 @@ def build_spawn_profile(state: GameState, base_request: dict[str, float]) -> dic
 
 
 def detect_blade_rush(trail: deque[tuple[int, int]], frame_scale: float) -> bool:
-    if len(trail) < 8:
+    if len(trail) < 10:
         return False
-    recent = list(trail)[-8:]
+    recent = list(trail)[-10:]
     dx = recent[-1][0] - recent[0][0]
     dy = recent[-1][1] - recent[0][1]
-    required_dx = max(120.0, 220.0 * frame_scale)
-    max_dy = max(45.0, 70.0 * frame_scale)
+    required_dx = max(170.0, 300.0 * frame_scale)
+    max_dy = max(28.0, 42.0 * frame_scale)
     if abs(dx) < required_dx or abs(dy) > max_dy:
         return False
 
@@ -240,13 +281,14 @@ def detect_blade_rush(trail: deque[tuple[int, int]], frame_scale: float) -> bool
     segment_dy = [recent[index][1] - recent[index - 1][1] for index in range(1, len(recent))]
     horizontal_total = sum(abs(value) for value in segment_dx)
     vertical_total = sum(abs(value) for value in segment_dy)
-    if horizontal_total < required_dx * 1.2 or vertical_total > max_dy * 1.5:
+    if horizontal_total < required_dx * 1.35 or vertical_total > max_dy * 1.25:
         return False
 
     direction = 1 if dx > 0 else -1
     aligned_segments = sum(1 for value in segment_dx if value * direction > 0)
-    end_burst = abs(segment_dx[-1]) + abs(segment_dx[-2])
-    return aligned_segments >= 6 and end_burst >= max(28.0, 42.0 * frame_scale)
+    strong_segments = sum(1 for value in segment_dx if abs(value) >= max(18.0, 26.0 * frame_scale))
+    end_burst = abs(segment_dx[-1]) + abs(segment_dx[-2]) + abs(segment_dx[-3])
+    return aligned_segments >= 8 and strong_segments >= 6 and end_burst >= max(70.0, 110.0 * frame_scale)
 
 
 def detect_cyclone(trail: deque[tuple[int, int]]) -> bool:
@@ -263,20 +305,23 @@ def detect_cyclone(trail: deque[tuple[int, int]]) -> bool:
 
 def get_spawn_interval_seconds(state: GameState) -> float:
     mode = state.settings.selected_mode
-    if mode == "禪模式":
-        return SPAWN_INTERVAL_SECONDS * 0.9
-    if mode == "挑戰模式":
-        return SPAWN_INTERVAL_SECONDS * 0.72
-    return SPAWN_INTERVAL_SECONDS
+    level_multiplier = max(0.62, 1.0 - (state.level - 1) * 0.035)
+    interval = SPAWN_INTERVAL_SECONDS * level_multiplier
+    if mode == MODE_ZEN:
+        interval *= 0.92
+    if mode == MODE_CHALLENGE:
+        interval *= 0.78
+    return max(0.48, interval)
 
 
 def get_max_active_fruits(state: GameState) -> int:
     mode = state.settings.selected_mode
-    if mode == "挑戰模式":
-        return 4
-    if mode == "禪模式":
+    level_bonus = 1 if state.level >= 4 else 0
+    if mode == MODE_CHALLENGE:
+        return 4 + level_bonus
+    if mode == MODE_ZEN:
         return 3
-    return 3
+    return 3 + level_bonus
 
 
 def main() -> None:
@@ -289,6 +334,7 @@ def main() -> None:
         show_camera_error()
         webcam.release()
         return
+    print(f"Camera backend: {webcam.backend_name}")
 
     tracker = HandTracker()
     spawner = Spawner()
@@ -319,12 +365,30 @@ def main() -> None:
         state.score += awarded_score
         last_score_time = current_time
         state.combo_flash_until = current_time + COMBO_POPUP_SECONDS
+        apply_level_up(state, current_time)
 
-        state.hit_effects.append(HitEffect(x=game_object.x, y=game_object.y, color=game_object.color, radius=game_object.radius * 0.7, ttl=HIT_EFFECT_LIFETIME_SECONDS, effect_type=game_object.effect))
+        state.hit_effects.append(
+            HitEffect(
+                x=game_object.x,
+                y=game_object.y,
+                color=game_object.color,
+                radius=game_object.radius * 0.7,
+                ttl=HIT_EFFECT_LIFETIME_SECONDS,
+                effect_type=game_object.effect,
+            )
+        )
         popup_color = (255, 230, 120) if game_object.effect == "gold" else (255, 255, 255)
         if current_time < state.fire_until:
             popup_color = (120, 220, 255)
-        state.score_popups.append(ScorePopup(x=game_object.x - game_object.radius * 0.6, y=game_object.y, text=f"+{awarded_score}", color=popup_color, ttl=POPUP_LIFETIME_SECONDS))
+        state.score_popups.append(
+            ScorePopup(
+                x=game_object.x - game_object.radius * 0.6,
+                y=game_object.y,
+                text=f"+{awarded_score}",
+                color=popup_color,
+                ttl=POPUP_LIFETIME_SECONDS,
+            )
+        )
 
         for _ in range(10):
             state.particles.append(
@@ -345,27 +409,64 @@ def main() -> None:
         elif game_object.effect == "freeze":
             state.freeze_sliced += 1
             state.freeze_until = current_time + FREEZE_DURATION_SECONDS
-            state.score_popups.append(ScorePopup(x=game_object.x - game_object.radius, y=game_object.y - game_object.radius, text="冰凍！", color=(255, 240, 140), ttl=POPUP_LIFETIME_SECONDS))
+            state.score_popups.append(
+                ScorePopup(
+                    x=game_object.x - game_object.radius,
+                    y=game_object.y - game_object.radius,
+                    text="\u51b0\u51cd\uff01",
+                    color=(255, 240, 140),
+                    ttl=POPUP_LIFETIME_SECONDS,
+                )
+            )
             play_freeze_sound()
         elif game_object.effect == "fire":
             state.fire_sliced += 1
             state.fire_until = current_time + FIRE_DURATION_SECONDS
-            state.score_popups.append(ScorePopup(x=game_object.x - game_object.radius, y=game_object.y - game_object.radius, text="火焰 x2！", color=(120, 220, 255), ttl=POPUP_LIFETIME_SECONDS))
+            state.score_popups.append(
+                ScorePopup(
+                    x=game_object.x - game_object.radius,
+                    y=game_object.y - game_object.radius,
+                    text="\u706b\u7130 x2\uff01",
+                    color=(120, 220, 255),
+                    ttl=POPUP_LIFETIME_SECONDS,
+                )
+            )
             play_gold_sound()
         elif game_object.effect == "shock":
             state.shock_sliced += 1
-            state.score_popups.append(ScorePopup(x=game_object.x - game_object.radius, y=game_object.y - game_object.radius, text="連鎖！", color=(255, 250, 140), ttl=POPUP_LIFETIME_SECONDS))
+            state.score_popups.append(
+                ScorePopup(
+                    x=game_object.x - game_object.radius,
+                    y=game_object.y - game_object.radius,
+                    text="\u96fb\u64ca\uff01",
+                    color=(255, 250, 140),
+                    ttl=POPUP_LIFETIME_SECONDS + 0.2,
+                )
+            )
             play_freeze_sound()
-            chain_radius = game_object.radius * SHOCK_CHAIN_RADIUS_MULTIPLIER
+            chain_radius = game_object.radius * SHOCK_CHAIN_RADIUS_MULTIPLIER * 1.45
             nearby_targets = []
             for target in state.objects:
                 if target.id == game_object.id or not target.is_alive or target.kind != "fruit":
                     continue
-                if euclidean_distance((int(game_object.x), int(game_object.y)), (int(target.x), int(target.y))) <= chain_radius:
+                distance = euclidean_distance((int(game_object.x), int(game_object.y)), (int(target.x), int(target.y)))
+                if distance <= chain_radius:
                     nearby_targets.append(target)
-            for target in nearby_targets[:3]:
-                if target.effect != "shock":
-                    slice_object(target)
+            nearby_targets.sort(
+                key=lambda target: euclidean_distance((int(game_object.x), int(game_object.y)), (int(target.x), int(target.y)))
+            )
+            state.hit_effects.append(
+                HitEffect(
+                    x=game_object.x,
+                    y=game_object.y,
+                    color=(80, 250, 255),
+                    radius=chain_radius * 0.65,
+                    ttl=0.42,
+                    effect_type="shock",
+                )
+            )
+            for target in nearby_targets[:5]:
+                slice_object(target)
         else:
             play_slice_sound()
 
@@ -423,15 +524,15 @@ def main() -> None:
                 elif triggered_action == "show_history":
                     show_history_menu(state, frame_width, frame_height)
                 elif triggered_action == "mode_arcade":
-                    state.settings.selected_mode = "標準模式"
+                    state.settings.selected_mode = MODE_ARCADE
                     save_settings(state.settings)
                     show_mode_menu(state, frame_width, frame_height)
                 elif triggered_action == "mode_zen":
-                    state.settings.selected_mode = "禪模式"
+                    state.settings.selected_mode = MODE_ZEN
                     save_settings(state.settings)
                     show_mode_menu(state, frame_width, frame_height)
                 elif triggered_action == "mode_challenge":
-                    state.settings.selected_mode = "挑戰模式"
+                    state.settings.selected_mode = MODE_CHALLENGE
                     save_settings(state.settings)
                     show_mode_menu(state, frame_width, frame_height)
                 elif triggered_action == "toggle_sound":
@@ -479,10 +580,27 @@ def main() -> None:
                         and current_time >= state.blade_rush_until
                     ):
                         state.blade_rush_until = current_time + 4.8
-                        state.blade_rush_cooldown_until = current_time + 1.6
+                        state.blade_rush_cooldown_until = current_time + 2.2
                         state.skill_charge = 0.0
-                        state.score_popups.append(ScorePopup(x=frame_width * 0.5 - 90, y=frame_height * 0.20, text="?????", color=(255, 220, 120), ttl=POPUP_LIFETIME_SECONDS + 0.4))
-                        state.hit_effects.append(HitEffect(x=frame_width * 0.5, y=frame_height * 0.5, color=(120, 200, 255), radius=min(frame_width, frame_height) * 0.22, ttl=0.55, effect_type="blade_rush"))
+                        state.score_popups.append(
+                            ScorePopup(
+                                x=frame_width * 0.5 - 90,
+                                y=frame_height * 0.20,
+                                text="\u5200\u92d2\u885d\u523a\uff01",
+                                color=(255, 220, 120),
+                                ttl=POPUP_LIFETIME_SECONDS + 0.4,
+                            )
+                        )
+                        state.hit_effects.append(
+                            HitEffect(
+                                x=frame_width * 0.5,
+                                y=frame_height * 0.5,
+                                color=(120, 200, 255),
+                                radius=min(frame_width, frame_height) * 0.22,
+                                ttl=0.55,
+                                effect_type="blade_rush",
+                            )
+                        )
                         for _ in range(26):
                             state.particles.append(
                                 Particle(
@@ -497,28 +615,50 @@ def main() -> None:
                             )
                         play_gold_sound()
 
-                    if detect_cyclone(state.trail) and state.skill_charge >= 0.75 and current_time >= state.cyclone_cooldown_until and tracking_result.index_finger_tip:
+                    if (
+                        detect_cyclone(state.trail)
+                        and state.skill_charge >= 0.75
+                        and current_time >= state.cyclone_cooldown_until
+                        and tracking_result.index_finger_tip
+                    ):
                         state.skill_charge = max(0.0, state.skill_charge - 0.75)
-                        state.cyclone_cooldown_until = current_time + 4.0
-                        cyclone_center = tracking_result.index_finger_tip
-                        state.hit_effects.append(HitEffect(x=cyclone_center[0], y=cyclone_center[1], color=(120, 240, 255), radius=max(110, int(160 * frame_scale)), ttl=0.5, effect_type="cyclone"))
-                        for _ in range(24):
+                        state.cyclone_cooldown_until = current_time + 4.8
+                        state.hit_effects.append(
+                            HitEffect(
+                                x=frame_width * 0.5,
+                                y=frame_height * 0.5,
+                                color=(120, 240, 255),
+                                radius=max(frame_width, frame_height) * 0.75,
+                                ttl=0.75,
+                                effect_type="cyclone",
+                            )
+                        )
+                        for _ in range(64):
                             state.particles.append(
                                 Particle(
-                                    x=cyclone_center[0],
-                                    y=cyclone_center[1],
-                                    vx=random_generator.uniform(-240.0, 240.0),
-                                    vy=random_generator.uniform(-240.0, 240.0),
+                                    x=frame_width * 0.5,
+                                    y=frame_height * 0.5,
+                                    vx=random_generator.uniform(-420.0, 420.0),
+                                    vy=random_generator.uniform(-420.0, 420.0),
                                     color=(120, 240, 255),
-                                    radius=random_generator.uniform(3.0, 6.0),
-                                    ttl=0.5 + random_generator.uniform(0.0, 0.25),
+                                    radius=random_generator.uniform(4.0, 9.0),
+                                    ttl=0.7 + random_generator.uniform(0.0, 0.35),
                                 )
                             )
                         for target in list(state.objects):
-                            if target.kind == "fruit" and target.is_alive and euclidean_distance(cyclone_center, (int(target.x), int(target.y))) <= max(150, int(240 * frame_scale)):
+                            if target.kind == "fruit" and target.is_alive:
                                 slice_object(target)
-                        state.score_popups.append(ScorePopup(x=cyclone_center[0] - 45, y=cyclone_center[1] - 20, text="????", color=(120, 240, 255), ttl=POPUP_LIFETIME_SECONDS + 0.35))
+                        state.score_popups.append(
+                            ScorePopup(
+                                x=frame_width * 0.5 - 78,
+                                y=frame_height * 0.18,
+                                text="\u65cb\u98a8\u65ac\uff01",
+                                color=(120, 240, 255),
+                                ttl=POPUP_LIFETIME_SECONDS + 0.55,
+                            )
+                        )
                         play_freeze_sound()
+
                     if speed >= SLICE_SPEED_THRESHOLD * frame_scale:
                         state.last_slice_segment = (slice_start, slice_end)
                         for game_object in state.objects:
@@ -530,13 +670,13 @@ def main() -> None:
                                 hit = point_to_segment_distance((game_object.x, game_object.y), slice_start, slice_end) <= game_object.radius + extra_radius
                             if hit:
                                 if game_object.kind == "bomb":
-                                    if state.settings.selected_mode == "禪模式":
+                                    if state.settings.selected_mode == MODE_ZEN:
                                         continue
                                     game_object.is_sliced = True
                                     game_object.is_alive = False
                                     play_bomb_sound()
                                     state.bombs_hit += 1
-                                    record_game_history(state, "炸彈")
+                                    record_game_history(state, END_REASON_BOMB)
                                     state.mode = "game_over"
                                     state.menu_buttons = build_game_over_menu(frame_width, frame_height)
                                 else:
@@ -561,7 +701,7 @@ def main() -> None:
 
                 state.objects = [game_object for game_object in state.objects if game_object.is_alive]
                 if state.misses >= MAX_MISSES:
-                    record_game_history(state, "失誤")
+                    record_game_history(state, END_REASON_MISS)
                     state.mode = "game_over"
                     state.menu_buttons = build_game_over_menu(frame_width, frame_height)
 
@@ -582,7 +722,11 @@ def main() -> None:
                     combo_progress=max(0.0, min(1.0, 1.0 - ((current_time - last_score_time) / COMBO_RESET_SECONDS))) if state.combo > 0 else 0.0,
                     skill_charge=state.skill_charge,
                     blade_rush_seconds_left=max(0.0, state.blade_rush_until - current_time),
-                    active_missions=state.active_missions,
+                    level=state.level,
+                    next_level_score=state.next_level_score,
+                    level_progress=get_level_progress(state),
+                    level_banner_text=state.level_banner_text,
+                    level_banner_seconds_left=max(0.0, state.level_transition_until - current_time),
                 )
 
             if tracking_result.index_finger_tip:
@@ -593,7 +737,7 @@ def main() -> None:
                 draw_menu_buttons(frame, state.menu_buttons, state.hovered_button_action, get_hover_progress(state, current_time))
                 draw_menu_pointer_hint(frame, tracking_result.index_finger_tip)
             elif state.mode == "game_over":
-                draw_game_over_screen(frame, state.score, state.completed_missions)
+                draw_game_over_screen(frame, state.score, state.highest_level_reached)
                 draw_menu_buttons(frame, state.menu_buttons, state.hovered_button_action, get_hover_progress(state, current_time))
                 draw_menu_pointer_hint(frame, tracking_result.index_finger_tip)
             elif state.mode == "history":
